@@ -164,8 +164,82 @@ function buildTextReport(results, recMonth, recYear, selected) {
   return lines.join('\n')
 }
 
+// Excel number formats
+const FMT_ACCT = '_("$"* #,##0.00_);_("$"* (#,##0.00);_("$"* "-"??_);_(@_)'  // Accounting
+const FMT_DATE = 'm/d/yyyy'
+const FMT_INT = '#,##0'
+
+/**
+ * Convert a JS Date to an Excel serial date number.
+ * Excel epoch is Jan 0, 1900 (with the Lotus 1-2-3 leap year bug).
+ */
+function toExcelDate(d) {
+  if (!d) return ''
+  const epoch = new Date(1899, 11, 30) // Dec 30, 1899
+  return (d - epoch) / 86400000
+}
+
+/**
+ * Apply cell format to a range of cells in a worksheet.
+ * colFormats is an object: { colIndex: formatString }
+ * Applies from startRow to endRow (inclusive, 0-indexed).
+ */
+function applyFormats(ws, colFormats, startRow, endRow) {
+  const range = ws['!ref'] ? XLSX_RANGE(ws['!ref']) : null
+  if (!range) return
+  for (let r = startRow; r <= endRow; r++) {
+    for (const [c, fmt] of Object.entries(colFormats)) {
+      const addr = cellAddr(r, +c)
+      if (ws[addr]) ws[addr].z = fmt
+    }
+  }
+}
+
+/** Convert 0-indexed row,col to Excel cell address like "A1" */
+function cellAddr(r, c) {
+  let col = ''
+  let cc = c
+  do { col = String.fromCharCode(65 + (cc % 26)) + col; cc = Math.floor(cc / 26) - 1 } while (cc >= 0)
+  return col + (r + 1)
+}
+
+/** Parse a range string like "A1:G100" into { sr, sc, er, ec } */
+function XLSX_RANGE(ref) {
+  const parts = ref.split(':')
+  const decode = (s) => {
+    let c = 0, r = 0, i = 0
+    while (i < s.length && s.charCodeAt(i) >= 65) { c = c * 26 + (s.charCodeAt(i) - 64); i++ }
+    r = parseInt(s.slice(i)) - 1
+    return { r, c: c - 1 }
+  }
+  const s = decode(parts[0]), e = parts[1] ? decode(parts[1]) : s
+  return { sr: s.r, sc: s.c, er: e.r, ec: e.c }
+}
+
+/**
+ * Build a formatted transaction sheet (used for matched, near-match).
+ * Columns: GL Date | GL Description | GL Amount | Bank Date | Bank Description | Bank Amount | Day Gap
+ */
+function buildMatchSheet(XLSX, rows, totals) {
+  const data = [['GL Date', 'GL Description', 'GL Amount', 'Bank Date', 'Bank Description', 'Bank Amount', 'Day Gap']]
+  for (const { gl, bk, dayDiff: dd } of rows) {
+    data.push([toExcelDate(gl.date), gl.desc, gl.net, toExcelDate(bk.date), bk.desc, bk.amt, dd])
+  }
+  if (totals) {
+    data.push([])
+    data.push(['', 'TOTAL', totals.gl, '', 'TOTAL', totals.bk, ''])
+  }
+  const ws = XLSX.utils.aoa_to_sheet(data)
+  ws['!cols'] = [{ wch: 12 }, { wch: 40 }, { wch: 16 }, { wch: 12 }, { wch: 50 }, { wch: 16 }, { wch: 8 }]
+  // Format date columns (0, 3) and amount columns (2, 5)
+  const lastRow = data.length - 1
+  applyFormats(ws, { 0: FMT_DATE, 2: FMT_ACCT, 3: FMT_DATE, 5: FMT_ACCT, 6: FMT_INT }, 1, lastRow)
+  return ws
+}
+
 /**
  * Build Excel workbook with selected sections as separate sheets.
+ * All dates as Excel date serials, all amounts in accounting format.
  */
 async function buildExcelWorkbook(results, recMonth, recYear, selected) {
   const XLSX = await import('xlsx')
@@ -182,7 +256,7 @@ async function buildExcelWorkbook(results, recMonth, recYear, selected) {
   const inTransitGLTotal = sum(inTransitGL, 'net')
   const inTransitBKTotal = sum(inTransitBK, 'amt')
 
-  // Summary sheet
+  // ── Summary sheet ──
   if (selected.summary || selected.result) {
     const data = [
       ['BANK RECONCILIATION', `${MONTHS[recMonth]} ${recYear}`],
@@ -201,57 +275,51 @@ async function buildExcelWorkbook(results, recMonth, recYear, selected) {
     }
     const ws = XLSX.utils.aoa_to_sheet(data)
     ws['!cols'] = [{ wch: 28 }, { wch: 10 }, { wch: 18 }]
+    applyFormats(ws, { 1: FMT_INT, 2: FMT_ACCT }, 4, data.length - 1)
     XLSX.utils.book_append_sheet(wb, ws, 'Summary')
   }
 
-  // Matched transactions
+  // ── Matched ──
   if (selected.matched && matched.length > 0) {
-    const data = [['GL Date', 'GL Description', 'GL Amount', 'Bank Date', 'Bank Description', 'Bank Amount', 'Day Gap']]
-    for (const { gl, bk, dayDiff: dd } of matched) {
-      data.push([fmtDate(gl.date), gl.desc, gl.net, fmtDate(bk.date), bk.desc, bk.amt, dd])
-    }
-    data.push([], ['', 'TOTAL', matchedGLTotal, '', 'TOTAL', matchedBKTotal])
-    const ws = XLSX.utils.aoa_to_sheet(data)
-    ws['!cols'] = [{ wch: 12 }, { wch: 40 }, { wch: 14 }, { wch: 12 }, { wch: 50 }, { wch: 14 }, { wch: 8 }]
+    const ws = buildMatchSheet(XLSX, matched, { gl: matchedGLTotal, bk: matchedBKTotal })
     XLSX.utils.book_append_sheet(wb, ws, 'Matched')
   }
 
-  // Near-matches
+  // ── Near-matches ──
   if (selected.nearMatch && nearMatch.length > 0) {
-    const data = [['GL Date', 'GL Description', 'GL Amount', 'Bank Date', 'Bank Description', 'Bank Amount', 'Day Gap']]
-    for (const { gl, bk, dayDiff: dd } of nearMatch) {
-      data.push([fmtDate(gl.date), gl.desc, gl.net, fmtDate(bk.date), bk.desc, bk.amt, dd])
-    }
-    const ws = XLSX.utils.aoa_to_sheet(data)
-    ws['!cols'] = [{ wch: 12 }, { wch: 40 }, { wch: 14 }, { wch: 12 }, { wch: 50 }, { wch: 14 }, { wch: 8 }]
+    const ws = buildMatchSheet(XLSX, nearMatch, null)
     XLSX.utils.book_append_sheet(wb, ws, 'Near-Match')
   }
 
-  // Unmatched GL
+  // ── Unmatched GL ──
   if (selected.glDetail && unmatchedGL.length > 0) {
     const data = [['Date', 'Description', 'Amount', 'Control #', 'Type']]
     for (const r of unmatchedGL) {
-      data.push([fmtDate(r.date), r.desc, r.net, r.control, r.isDepositTotal ? 'Deposit Total' : 'Payment'])
+      data.push([toExcelDate(r.date), r.desc, r.net, r.control, r.isDepositTotal ? 'Deposit Total' : 'Payment'])
     }
-    data.push([], ['', 'TOTAL', unmatchedGLTotal])
+    data.push([])
+    data.push(['', 'TOTAL', unmatchedGLTotal, '', ''])
     const ws = XLSX.utils.aoa_to_sheet(data)
-    ws['!cols'] = [{ wch: 12 }, { wch: 50 }, { wch: 14 }, { wch: 14 }, { wch: 16 }]
+    ws['!cols'] = [{ wch: 12 }, { wch: 50 }, { wch: 16 }, { wch: 14 }, { wch: 16 }]
+    applyFormats(ws, { 0: FMT_DATE, 2: FMT_ACCT }, 1, data.length - 1)
     XLSX.utils.book_append_sheet(wb, ws, 'Outstanding GL')
   }
 
-  // Unmatched Bank
+  // ── Unmatched Bank ──
   if (selected.bankDetail && unmatchedBK.length > 0) {
     const data = [['Date', 'Description', 'Amount', 'Category']]
     for (const r of unmatchedBK) {
-      data.push([fmtDate(r.date), r.desc, r.amt, CATEGORY_LABELS[r.category] || r.category])
+      data.push([toExcelDate(r.date), r.desc, r.amt, CATEGORY_LABELS[r.category] || r.category])
     }
-    data.push([], ['', 'TOTAL', unmatchedBKTotal])
+    data.push([])
+    data.push(['', 'TOTAL', unmatchedBKTotal, ''])
     const ws = XLSX.utils.aoa_to_sheet(data)
-    ws['!cols'] = [{ wch: 12 }, { wch: 70 }, { wch: 14 }, { wch: 16 }]
+    ws['!cols'] = [{ wch: 12 }, { wch: 70 }, { wch: 16 }, { wch: 16 }]
+    applyFormats(ws, { 0: FMT_DATE, 2: FMT_ACCT }, 1, data.length - 1)
     XLSX.utils.book_append_sheet(wb, ws, 'Unrecorded Bank')
   }
 
-  // Verification
+  // ── Verification ──
   if (selected.verification && verification) {
     const data = [['Check', 'Status', 'Detail']]
     for (const c of verification.checks) {
@@ -303,11 +371,15 @@ export function ReportModal({ results, recMonth, recYear, onClose }) {
     XLSX.writeFile(wb, filename)
   }, [results, recMonth, recYear, selected])
 
+  const [emailCopied, setEmailCopied] = useState(false)
+
   const handleEmail = useCallback(() => {
     const text = buildTextReport(results, recMonth, recYear, selected)
     const subject = `Bank Reconciliation \u2014 ${MONTHS[recMonth]} ${recYear}`
-    const mailto = `mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(text)}`
-    window.open(mailto, '_blank')
+    // Copy full report to clipboard (avoids mailto: URL length limits)
+    navigator.clipboard.writeText(`Subject: ${subject}\n\n${text}`)
+    setEmailCopied(true)
+    setTimeout(() => setEmailCopied(false), 3000)
   }, [results, recMonth, recYear, selected])
 
   return (
@@ -362,7 +434,7 @@ export function ReportModal({ results, recMonth, recYear, onClose }) {
             onClick={handleEmail}
             className="flex-1 border border-gray-300 hover:border-indigo-400 text-gray-700 hover:text-indigo-700 font-semibold px-5 py-2.5 rounded-xl transition-colors text-sm"
           >
-            Email Report
+            {emailCopied ? '\u2713 Copied — paste into email' : 'Copy for Email'}
           </button>
         </div>
       </div>
