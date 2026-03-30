@@ -1,7 +1,7 @@
 import { useState, useCallback } from 'react'
-import { parseCSV, fmtAmt, fmtDate, detectBankName } from './utils/csv'
+import { parseCSV, fmtAmt, fmtDate, detectBankName, parseDate } from './utils/csv'
 import { detectGLCols, detectBankCols } from './utils/columns'
-import { parseGLRows, parseBankRows, matchTransactions, CATEGORY_LABELS, runVerification } from './utils/matching'
+import { parseGLRows, parseBankRows, matchTransactions, CATEGORY_LABELS, runVerification, detectPeriod } from './utils/matching'
 import { Section, Tag } from './components/Section'
 import { SummaryCard } from './components/SummaryCard'
 import { PasteZone } from './components/PasteZone'
@@ -128,6 +128,7 @@ export default function App() {
   const [detectedBank, setDetectedBank] = useState(null)
   const [detectedGL, setDetectedGL] = useState(null)
   const [copied, setCopied] = useState(false)
+  const [reportText, setReportText] = useState('')
 
   const handleBankChange = useCallback((val) => {
     setBankText(val)
@@ -163,6 +164,18 @@ export default function App() {
         if (cols.debitCol >= 0) parts.push(`Debit/Credit split`)
         parts.push(`${rows.length - cols.headerRow - 1} rows`)
         setDetectedGL(parts.join(' · '))
+
+        // Auto-detect period from GL dates and set rec month/year
+        if (cols.dateCol >= 0) {
+          const dateRows = rows.slice(cols.headerRow + 1)
+            .map(r => ({ date: parseDate(r[cols.dateCol]) }))
+            .filter(r => r.date)
+          const period = detectPeriod(dateRows)
+          if (period) {
+            setRecMonth(period.month)
+            setRecYear(period.year)
+          }
+        }
       }
     } else {
       setDetectedGL(null)
@@ -394,10 +407,20 @@ export default function App() {
       }
     }
 
-    navigator.clipboard.writeText(lines.join('\n'))
+    const report = lines.join('\n')
+    setReportText(report)
+    navigator.clipboard.writeText(report)
     setCopied(true)
     setTimeout(() => setCopied(false), 2000)
   }, [results, recMonth, recYear])
+
+  const emailReport = useCallback(() => {
+    if (!reportText && results) copyReport()  // generate report first if needed
+    const subject = `Bank Reconciliation — ${MONTHS[recMonth]} ${recYear}`
+    const body = reportText || '(Run "Copy Report" first to generate the report)'
+    const mailto = `mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`
+    window.open(mailto, '_blank')
+  }, [reportText, results, copyReport, recMonth, recYear])
 
   const years = [recYear - 1, recYear, recYear + 1]
 
@@ -496,12 +519,20 @@ export default function App() {
             Run Reconciliation
           </button>
           {results && (
-            <button
-              onClick={copyReport}
-              className="border border-gray-300 hover:border-indigo-400 text-gray-600 hover:text-indigo-700 font-medium px-5 py-3 rounded-xl transition-colors text-sm"
-            >
-              {copied ? '✓ Copied!' : 'Copy Report'}
-            </button>
+            <>
+              <button
+                onClick={copyReport}
+                className="border border-gray-300 hover:border-indigo-400 text-gray-600 hover:text-indigo-700 font-medium px-5 py-3 rounded-xl transition-colors text-sm"
+              >
+                {copied ? '✓ Copied!' : 'Copy Report'}
+              </button>
+              <button
+                onClick={emailReport}
+                className="border border-gray-300 hover:border-emerald-400 text-gray-600 hover:text-emerald-700 font-medium px-5 py-3 rounded-xl transition-colors text-sm"
+              >
+                Email Report
+              </button>
+            </>
           )}
           {error && <span className="text-sm text-red-600 bg-red-50 border border-red-200 px-4 py-2 rounded-lg">{error}</span>}
         </div>
