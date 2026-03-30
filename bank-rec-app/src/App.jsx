@@ -1,7 +1,7 @@
 import { useState, useCallback } from 'react'
 import { parseCSV, fmtAmt, fmtDate, detectBankName } from './utils/csv'
 import { detectGLCols, detectBankCols } from './utils/columns'
-import { parseGLRows, parseBankRows, matchTransactions, CATEGORY_LABELS } from './utils/matching'
+import { parseGLRows, parseBankRows, matchTransactions, CATEGORY_LABELS, runVerification } from './utils/matching'
 import { Section, Tag } from './components/Section'
 import { SummaryCard } from './components/SummaryCard'
 import { PasteZone } from './components/PasteZone'
@@ -73,6 +73,8 @@ function SingleSideTable({ rows, side }) {
             {!isGL && <td className="py-2 px-3">
               <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
                 r.category === 'wire' ? 'bg-purple-50 text-purple-700 border border-purple-200' :
+                r.category === 'card_deposit' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' :
+                r.category === 'settlement' ? 'bg-teal-50 text-teal-700 border border-teal-200' :
                 r.category === 'ach' ? 'bg-blue-50 text-blue-700 border border-blue-200' :
                 r.category === 'fee' ? 'bg-orange-50 text-orange-700 border border-orange-200' :
                 r.category === 'check' ? 'bg-gray-100 text-gray-600 border border-gray-200' :
@@ -98,6 +100,8 @@ function CategorySummary({ category, items }) {
   const total = items.reduce((s, r) => s + r.amt, 0)
   const colors = {
     wire: 'bg-purple-50 text-purple-700 border-purple-200',
+    card_deposit: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+    settlement: 'bg-teal-50 text-teal-700 border-teal-200',
     ach: 'bg-blue-50 text-blue-700 border-blue-200',
     fee: 'bg-orange-50 text-orange-700 border-orange-200',
     check: 'bg-gray-100 text-gray-600 border-gray-200',
@@ -188,7 +192,9 @@ export default function App() {
       if (bk.length === 0) { setError('No usable bank transactions found after parsing.'); return }
 
       const result = matchTransactions(gl, bk, recMonth, recYear, transitStart, transitEnd)
-      setResults({ ...result, gl, bk, glCols, bkCols })
+      const fullResult = { ...result, gl, bk, glCols, bkCols }
+      const verification = runVerification(fullResult)
+      setResults({ ...fullResult, verification })
     } catch (e) {
       setError('Parsing error: ' + e.message)
     }
@@ -367,6 +373,24 @@ export default function App() {
         lines.push(`  GL: ${pad(fmtDate(gl.date), 12)} ${pad(gl.desc, 30)} ${rpad(fmtAmt(gl.net), 12)}`)
         lines.push(`  BK: ${pad(fmtDate(bk.date), 12)} ${pad(bk.desc, 30)} ${rpad(fmtAmt(bk.amt), 12)}  (${dd} days apart)`)
         lines.push('')
+      }
+    }
+
+    // Append verification results
+    if (results.verification) {
+      const v = results.verification
+      lines.push(
+        '',
+        divider,
+        'INTEGRITY VERIFICATION',
+        divider,
+        '',
+        `  ${v.summary}`,
+        '',
+      )
+      for (const check of v.checks) {
+        const icon = check.pass ? 'PASS' : check.severity === 'warning' ? 'WARN' : 'FAIL'
+        lines.push(`  [${icon}] ${check.label}: ${check.detail}`)
       }
     }
 
@@ -698,6 +722,50 @@ export default function App() {
                   )
                 })()}
               </div>
+
+              {/* Verification Panel */}
+              {results.verification && (
+                <div className={`rounded-xl border shadow-sm p-5 ${
+                  results.verification.allHardPass
+                    ? 'bg-green-50 border-green-300'
+                    : 'bg-red-50 border-red-300'
+                }`}>
+                  <div className="flex items-center justify-between mb-4">
+                    <div className="flex items-center gap-2">
+                      <span className="text-lg">{results.verification.allHardPass ? '✓' : '✗'}</span>
+                      <span className={`text-sm font-bold ${results.verification.allHardPass ? 'text-green-800' : 'text-red-800'}`}>
+                        Integrity Verification
+                      </span>
+                    </div>
+                    <span className={`text-xs font-medium px-3 py-1 rounded-full ${
+                      results.verification.allHardPass
+                        ? 'bg-green-200 text-green-800'
+                        : 'bg-red-200 text-red-800'
+                    }`}>
+                      {results.verification.passCount}/{results.verification.totalChecks} checks passed
+                    </span>
+                  </div>
+                  <div className="flex flex-col gap-2">
+                    {results.verification.checks.map((check, i) => (
+                      <div key={i} className={`flex items-start gap-2 text-xs rounded-lg px-3 py-2 ${
+                        check.pass
+                          ? 'bg-white/60 text-green-800'
+                          : check.severity === 'warning'
+                            ? 'bg-amber-100/60 text-amber-900'
+                            : 'bg-red-100/80 text-red-900'
+                      }`}>
+                        <span className="mt-0.5 font-bold shrink-0">
+                          {check.pass ? '✓' : check.severity === 'warning' ? '⚠' : '✗'}
+                        </span>
+                        <div>
+                          <span className="font-semibold">{check.label}:</span>{' '}
+                          <span>{check.detail}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           )
         })()}

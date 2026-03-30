@@ -24,21 +24,32 @@ function isSummaryRow(row) {
 
 /**
  * Categorize a bank transaction by its description.
- * Returns: 'ach', 'wire', 'fee', 'check', 'transfer', 'other'
+ * Returns: 'wire', 'card_deposit', 'settlement', 'ach', 'fee', 'check', 'transfer', 'other'
  */
 export function categorizeBankItem(desc) {
   const d = (desc || '').toUpperCase()
+  // Wire transfers (PNC WT FED#, FEDWIRE, SWIFT, etc.)
   if (/\bWT\b|WIRE\s*(TRANSFER|TRF|XFER)?|FED\s*#|FEDWIRE|SWIFT/i.test(d)) return 'wire'
+  // Card/payment processor deposits (Yardi card deposits, Stripe, Square, etc.)
+  if (/CARD\s*DEP|YARDI\s*CARD|STRIPE|SQUARE\s*DEP|POS\s*DEP/i.test(d)) return 'card_deposit'
+  // Settlement deposits (Westminster, payment processor settlements)
+  if (/SETTLEMENT|SETTLE\b/i.test(d)) return 'settlement'
+  // ACH deposits/payments
   if (/\bACH\b|AUTOPAY|AUTO\s*PAY|DIRECT\s*DEP|ELEC\s*(DEPOSIT|PMT)|E-?CHECK/i.test(d)) return 'ach'
+  // Fees and service charges
   if (/\bFEE\b|SRVC\s*CHRG|SERVICE\s*CHARGE|ANALYSIS\s*CHRG|MAINTENANCE|MAINT\s*FEE|OVERDRAFT/i.test(d)) return 'fee'
+  // Checks
   if (/^CHECK\b|^CHK\b|CHECK\s*#?\d|CHK\s*#?\d/i.test(d)) return 'check'
+  // Internal transfers
   if (/\bTRANSFER\b|XFER|TRF(?!\s*FEE)/i.test(d)) return 'transfer'
   return 'other'
 }
 
 export const CATEGORY_LABELS = {
-  ach: 'ACH',
   wire: 'Wire Transfer',
+  card_deposit: 'Card Deposit',
+  settlement: 'Settlement',
+  ach: 'ACH',
   fee: 'Bank Fee',
   check: 'Check',
   transfer: 'Transfer',
@@ -253,9 +264,11 @@ export function matchTransactions(gl, bk, recMonth, recYear, transitStart, trans
     bankByCategory[cat].push(b)
   }
 
+  const unmatchedGL = glFiltered.filter(g => !usedGL.has(g.id))
+
   return {
     matched, nearMatch,
-    unmatchedGL: glFiltered.filter(g => !usedGL.has(g.id)),
+    unmatchedGL,
     unmatchedBK,
     bankByCategory,
     inTransitGL,
@@ -264,5 +277,162 @@ export function matchTransactions(gl, bk, recMonth, recYear, transitStart, trans
     periodWarning,
     glPeriod,
     bkPeriod,
+  }
+}
+
+/**
+ * DETERMINISTIC VERIFICATION ENGINE
+ *
+ * Runs pure-math checks on reconciliation results. No AI, no guessing.
+ * Each check returns { pass: boolean, label: string, detail: string }
+ */
+export function runVerification(results) {
+  const checks = []
+  const { matched, nearMatch, unmatchedGL, unmatchedBK,
+          inTransitGL, inTransitBK, receiptDetails, gl, bk } = results
+
+  // ── CHECK 1: Row accountability (GL) ──
+  // Every parsed GL row must appear in exactly one bucket
+  const glMatchable = matched.length + nearMatch.length + unmatchedGL.length + inTransitGL.length
+  const glTotal = glMatchable + (receiptDetails?.length || 0)
+  const glParsed = gl.length
+  const glPass = glTotal === glParsed
+  checks.push({
+    pass: glPass,
+    label: 'GL Row Accountability',
+    detail: glPass
+      ? `All ${glParsed} GL rows accounted for (${matched.length} matched + ${nearMatch.length} near + ${unmatchedGL.length} unmatched + ${inTransitGL.length} in-transit + ${receiptDetails?.length || 0} receipt details)`
+      : `MISMATCH: ${glParsed} GL rows parsed but ${glTotal} accounted for. ${glParsed - glTotal} row(s) missing.`,
+  })
+
+  // ── CHECK 2: Row accountability (Bank) ──
+  const bkTotal = matched.length + nearMatch.length + unmatchedBK.length + inTransitBK.length
+  const bkParsed = bk.length
+  const bkPass = bkTotal === bkParsed
+  checks.push({
+    pass: bkPass,
+    label: 'Bank Row Accountability',
+    detail: bkPass
+      ? `All ${bkParsed} bank rows accounted for (${matched.length} matched + ${nearMatch.length} near + ${unmatchedBK.length} unmatched + ${inTransitBK.length} in-transit)`
+      : `MISMATCH: ${bkParsed} bank rows parsed but ${bkTotal} accounted for. ${bkParsed - bkTotal} row(s) missing.`,
+  })
+
+  // ── CHECK 3: Matched amounts cross-foot ──
+  // For every matched pair, GL net should equal bank amt within tolerance
+  let crossFootErrors = 0
+  for (const m of matched) {
+    if (Math.abs(m.gl.net - m.bk.amt) > 0.02) crossFootErrors++
+  }
+  for (const m of nearMatch) {
+    if (Math.abs(m.gl.net - m.bk.amt) > 0.02) crossFootErrors++
+  }
+  checks.push({
+    pass: crossFootErrors === 0,
+    label: 'Matched Amounts Cross-Foot',
+    detail: crossFootErrors === 0
+      ? `All ${matched.length + nearMatch.length} matched pairs agree within $0.02`
+      : `${crossFootErrors} matched pair(s) have amount differences exceeding $0.02`,
+  })
+
+  // ── CHECK 4: No duplicate IDs ──
+  const allGLIds = [
+    ...matched.map(m => m.gl.id),
+    ...nearMatch.map(m => m.gl.id),
+    ...unmatchedGL.map(r => r.id),
+    ...inTransitGL.map(r => r.id),
+    ...(receiptDetails || []).map(r => r.id),
+  ]
+  const glDupCount = allGLIds.length - new Set(allGLIds).size
+  const allBKIds = [
+    ...matched.map(m => m.bk.id),
+    ...nearMatch.map(m => m.bk.id),
+    ...unmatchedBK.map(r => r.id),
+    ...inTransitBK.map(r => r.id),
+  ]
+  const bkDupCount = allBKIds.length - new Set(allBKIds).size
+  const noDups = glDupCount === 0 && bkDupCount === 0
+  checks.push({
+    pass: noDups,
+    label: 'No Duplicate Assignments',
+    detail: noDups
+      ? 'No transaction appears in more than one bucket'
+      : `${glDupCount} GL duplicate(s) and ${bkDupCount} bank duplicate(s) found — a row is counted in multiple buckets`,
+  })
+
+  // ── CHECK 5: Matched GL total = Matched Bank total ──
+  const matchedGLSum = matched.reduce((s, m) => s + m.gl.net, 0)
+  const matchedBKSum = matched.reduce((s, m) => s + m.bk.amt, 0)
+  const matchedDiff = Math.abs(matchedGLSum - matchedBKSum)
+  const matchTotalPass = matchedDiff < 0.02 * matched.length  // allow $0.02 rounding per pair
+  checks.push({
+    pass: matchTotalPass,
+    label: 'Matched Totals Agree',
+    detail: matchTotalPass
+      ? `Matched GL total ($${matchedGLSum.toFixed(2)}) ≈ Matched bank total ($${matchedBKSum.toFixed(2)}), diff $${matchedDiff.toFixed(2)}`
+      : `Matched GL total ($${matchedGLSum.toFixed(2)}) ≠ Matched bank total ($${matchedBKSum.toFixed(2)}), diff $${matchedDiff.toFixed(2)}`,
+  })
+
+  // ── CHECK 6: Suspicious duplicates (same amount + same date on same side) ──
+  const glAmtDateMap = {}
+  const suspiciousGL = []
+  for (const r of gl) {
+    const key = `${r.date?.toISOString()?.slice(0,10)}|${r.net.toFixed(2)}`
+    if (glAmtDateMap[key]) {
+      suspiciousGL.push({ existing: glAmtDateMap[key], duplicate: r })
+    } else {
+      glAmtDateMap[key] = r
+    }
+  }
+  const bkAmtDateMap = {}
+  const suspiciousBK = []
+  for (const r of bk) {
+    const key = `${r.date?.toISOString()?.slice(0,10)}|${r.amt.toFixed(2)}`
+    if (bkAmtDateMap[key]) {
+      suspiciousBK.push({ existing: bkAmtDateMap[key], duplicate: r })
+    } else {
+      bkAmtDateMap[key] = r
+    }
+  }
+  const hasSuspicious = suspiciousGL.length > 0 || suspiciousBK.length > 0
+  checks.push({
+    pass: !hasSuspicious,
+    label: 'Possible Duplicate Transactions',
+    detail: hasSuspicious
+      ? `Found ${suspiciousGL.length} GL and ${suspiciousBK.length} bank entries with same amount + date (possible double-posts). Review recommended.`
+      : 'No same-amount, same-date duplicates detected',
+    severity: 'warning',  // not an error, just a flag
+    duplicates: hasSuspicious ? { gl: suspiciousGL, bk: suspiciousBK } : null,
+  })
+
+  // ── CHECK 7: Large unmatched items ──
+  const LARGE_THRESHOLD = 50000
+  const largeGL = unmatchedGL.filter(r => Math.abs(r.net) >= LARGE_THRESHOLD)
+  const largeBK = unmatchedBK.filter(r => Math.abs(r.amt) >= LARGE_THRESHOLD)
+  const hasLarge = largeGL.length > 0 || largeBK.length > 0
+  checks.push({
+    pass: !hasLarge,
+    label: `Large Unmatched Items (≥$${(LARGE_THRESHOLD/1000).toFixed(0)}K)`,
+    detail: hasLarge
+      ? `${largeGL.length} GL and ${largeBK.length} bank unmatched items exceed $${(LARGE_THRESHOLD/1000).toFixed(0)}K. Manual review recommended.`
+      : `No unmatched items exceed $${(LARGE_THRESHOLD/1000).toFixed(0)}K`,
+    severity: 'warning',
+    largeItems: hasLarge ? { gl: largeGL, bk: largeBK } : null,
+  })
+
+  // ── OVERALL SCORE ──
+  const hardChecks = checks.filter(c => c.severity !== 'warning')
+  const passCount = hardChecks.filter(c => c.pass).length
+  const totalHard = hardChecks.length
+  const allHardPass = passCount === totalHard
+
+  return {
+    checks,
+    passCount,
+    totalChecks: checks.length,
+    totalHard,
+    allHardPass,
+    summary: allHardPass
+      ? `All ${totalHard} integrity checks passed.`
+      : `${totalHard - passCount} of ${totalHard} integrity checks FAILED.`,
   }
 }
