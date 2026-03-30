@@ -3,32 +3,37 @@ import { useState } from 'react'
 export function Section({ title, badge, children, defaultOpen = true }) {
   const [open, setOpen] = useState(defaultOpen)
   return (
-    <div className="border border-gray-200 rounded-xl overflow-hidden shadow-sm">
+    <div className="glass-card overflow-hidden">
       <button
         onClick={() => setOpen(o => !o)}
-        className="w-full flex items-center justify-between px-4 py-3 bg-gray-50 hover:bg-gray-100 transition-colors"
+        className="w-full flex items-center justify-between px-5 py-3.5 bg-surface-2/60 hover:bg-surface-3/60 transition-colors"
       >
         <div className="flex items-center gap-3">
-          <span className="font-semibold text-sm text-gray-800">{title}</span>
+          <span className="font-semibold text-sm text-slate-200">{title}</span>
           {badge}
         </div>
-        <span className="text-gray-400 text-xs">{open ? '▲' : '▼'}</span>
+        <svg
+          className={`w-4 h-4 text-slate-500 transition-transform duration-200 ${open ? 'rotate-180' : ''}`}
+          fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+        </svg>
       </button>
-      {open && children}
+      {open && <div className="border-t border-border-subtle">{children}</div>}
     </div>
   )
 }
 
 export function Tag({ color, children }) {
   const styles = {
-    green: 'bg-green-100 text-green-800 border-green-200',
-    red: 'bg-red-100 text-red-800 border-red-200',
-    amber: 'bg-amber-100 text-amber-800 border-amber-200',
-    gray: 'bg-gray-100 text-gray-600 border-gray-200',
-    blue: 'bg-blue-100 text-blue-800 border-blue-200',
+    green: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/20',
+    red: 'bg-red-500/15 text-red-400 border-red-500/20',
+    amber: 'bg-amber-500/15 text-amber-400 border-amber-500/20',
+    gray: 'bg-white/5 text-slate-400 border-white/10',
+    blue: 'bg-blue-500/15 text-blue-400 border-blue-500/20',
   }
   return (
-    <span className={`inline-block text-xs font-semibold px-2 py-0.5 rounded-full border ${styles[color] || styles.gray}`}>
+    <span className={`inline-block text-xs font-semibold px-2.5 py-0.5 rounded-full border ${styles[color] || styles.gray}`}>
       {children}
     </span>
   )

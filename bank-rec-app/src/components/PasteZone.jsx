@@ -1,21 +1,15 @@
 import { useState, useRef, useCallback } from 'react'
 import * as XLSX from 'xlsx'
 
-/**
- * Reads a file (CSV or Excel) and returns its text content as CSV/TSV.
- * Excel files are converted to TSV so the parser can handle them.
- */
 function readFile(file) {
   return new Promise((resolve, reject) => {
     const ext = file.name.split('.').pop().toLowerCase()
-
     if (ext === 'xlsx' || ext === 'xls') {
       const reader = new FileReader()
       reader.onload = (e) => {
         try {
           const wb = XLSX.read(e.target.result, { type: 'array' })
           const ws = wb.Sheets[wb.SheetNames[0]]
-          // Convert to TSV (tab-separated) so our parser handles it
           const tsv = XLSX.utils.sheet_to_csv(ws, { FS: '\t' })
           resolve({ text: tsv, fileName: file.name })
         } catch (err) {
@@ -25,7 +19,6 @@ function readFile(file) {
       reader.onerror = () => reject(new Error('Failed to read file'))
       reader.readAsArrayBuffer(file)
     } else {
-      // CSV, TSV, TXT — read as text
       const reader = new FileReader()
       reader.onload = (e) => resolve({ text: e.target.result, fileName: file.name })
       reader.onerror = () => reject(new Error('Failed to read file'))
@@ -58,13 +51,8 @@ export function PasteZone({ label, hint, value, onChange, detected }) {
     if (file) handleFile(file)
   }, [handleFile])
 
-  const onDragOver = useCallback((e) => {
-    e.preventDefault()
-    setDragOver(true)
-  }, [])
-
+  const onDragOver = useCallback((e) => { e.preventDefault(); setDragOver(true) }, [])
   const onDragLeave = useCallback(() => setDragOver(false), [])
-
   const onFileSelect = useCallback((e) => {
     const file = e.target.files?.[0]
     if (file) handleFile(file)
@@ -73,17 +61,17 @@ export function PasteZone({ label, hint, value, onChange, detected }) {
   const hasData = value && value.trim().length > 0
 
   return (
-    <div className="flex flex-col gap-2">
+    <div className="flex flex-col gap-2.5">
       <div className="flex items-center justify-between">
-        <label className="text-sm font-semibold text-gray-700">{label}</label>
+        <label className="text-sm font-semibold text-slate-300">{label}</label>
         <div className="flex items-center gap-2">
           {fileName && (
-            <span className="text-xs bg-blue-50 text-blue-700 border border-blue-200 px-2 py-0.5 rounded-full font-medium truncate max-w-[160px]">
+            <span className="text-[11px] bg-blue-500/10 text-blue-400 border border-blue-500/20 px-2.5 py-0.5 rounded-full font-medium truncate max-w-[160px]">
               {fileName}
             </span>
           )}
           {detected && (
-            <span className="text-xs bg-green-100 text-green-700 border border-green-200 px-2 py-0.5 rounded-full font-medium">
+            <span className="text-[11px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2.5 py-0.5 rounded-full font-medium">
               {detected}
             </span>
           )}
@@ -91,49 +79,55 @@ export function PasteZone({ label, hint, value, onChange, detected }) {
       </div>
 
       <div
-        className={`relative rounded-lg border-2 border-dashed transition-colors ${
+        className={`relative rounded-xl border-2 border-dashed transition-all duration-200 ${
           dragOver
-            ? 'border-indigo-400 bg-indigo-50'
+            ? 'border-blue-500/50 bg-blue-500/5'
             : hasData
-            ? 'border-green-300 bg-green-50/30'
-            : 'border-gray-300 bg-gray-50'
+            ? 'border-emerald-500/20 bg-emerald-500/[0.03]'
+            : 'border-white/8 bg-surface-2/40 hover:border-white/12'
         }`}
         onDrop={onDrop}
         onDragOver={onDragOver}
         onDragLeave={onDragLeave}
       >
-        {/* Drop overlay */}
         {dragOver && (
-          <div className="absolute inset-0 bg-indigo-100/80 rounded-lg flex items-center justify-center z-10">
-            <span className="text-indigo-700 font-semibold text-sm">Drop file here</span>
+          <div className="absolute inset-0 bg-blue-500/10 backdrop-blur-sm rounded-xl flex items-center justify-center z-10">
+            <div className="flex flex-col items-center gap-2">
+              <svg className="w-8 h-8 text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
+              </svg>
+              <span className="text-blue-400 font-semibold text-sm">Drop file here</span>
+            </div>
           </div>
         )}
 
-        {/* Textarea for paste */}
         <textarea
-          className="w-full h-28 p-3 text-xs font-mono bg-transparent focus:outline-none resize-none"
+          className="w-full h-28 p-3.5 text-xs font-mono bg-transparent text-slate-400 placeholder-slate-600 focus:outline-none resize-none focus:text-slate-300"
           placeholder={hint}
           value={value}
           onChange={e => { setFileName(null); onChange(e.target.value) }}
         />
 
-        {/* Bottom bar with upload button */}
-        <div className="flex items-center justify-between px-3 py-2 border-t border-gray-200/60">
-          <span className="text-xs text-gray-400">
-            {hasData ? `${value.split('\n').length} lines loaded` : 'Drag & drop or paste CSV / Excel'}
+        <div className="flex items-center justify-between px-3.5 py-2.5 border-t border-white/[0.04]">
+          <span className="text-[11px] text-slate-600">
+            {hasData ? (
+              <span className="text-slate-500">{value.split('\n').length} lines loaded</span>
+            ) : (
+              'Drag & drop or paste CSV / Excel'
+            )}
           </span>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2.5">
             {hasData && (
               <button
                 onClick={() => { onChange(''); setFileName(null); setError(null) }}
-                className="text-xs text-gray-400 hover:text-red-500 transition-colors"
+                className="text-[11px] text-slate-500 hover:text-red-400 transition-colors"
               >
                 Clear
               </button>
             )}
             <button
               onClick={() => fileInput.current?.click()}
-              className="text-xs font-medium text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 px-3 py-1.5 rounded-md transition-colors"
+              className="text-[11px] font-medium text-blue-400 hover:text-blue-300 bg-blue-500/10 hover:bg-blue-500/15 px-3 py-1.5 rounded-lg transition-all"
             >
               Upload File
             </button>
@@ -150,7 +144,7 @@ export function PasteZone({ label, hint, value, onChange, detected }) {
       </div>
 
       {error && (
-        <span className="text-xs text-red-600 bg-red-50 border border-red-200 px-3 py-1.5 rounded">
+        <span className="text-[11px] text-red-400 bg-red-500/10 border border-red-500/20 px-3 py-1.5 rounded-lg">
           {error}
         </span>
       )}
