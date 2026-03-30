@@ -1,7 +1,7 @@
 import { useState, useCallback } from 'react'
 import { parseCSV, fmtAmt, fmtDate, detectBankName } from './utils/csv'
 import { detectGLCols, detectBankCols } from './utils/columns'
-import { parseGLRows, parseBankRows, matchTransactions } from './utils/matching'
+import { parseGLRows, parseBankRows, matchTransactions, CATEGORY_LABELS } from './utils/matching'
 import { Section, Tag } from './components/Section'
 import { SummaryCard } from './components/SummaryCard'
 import { PasteZone } from './components/PasteZone'
@@ -58,17 +58,28 @@ function SingleSideTable({ rows, side }) {
           <th className="py-2 px-3 text-left">Description</th>
           <th className="py-2 px-3 text-right">Amount</th>
           {isGL && <th className="py-2 px-3 text-left">Control</th>}
+          {!isGL && <th className="py-2 px-3 text-left">Type</th>}
         </tr>
       </thead>
       <tbody>
         {rows.map(r => (
           <tr key={r.id} className="border-b border-gray-100 hover:bg-gray-50">
-            <td className="py-2 px-3 text-gray-500">{isGL ? fmtDate(r.date) : fmtDate(r.date)}</td>
+            <td className="py-2 px-3 text-gray-500">{fmtDate(r.date)}</td>
             <td className="py-2 px-3 max-w-[300px] truncate text-gray-700">{r.desc}</td>
             <td className={`py-2 px-3 font-mono font-semibold text-right ${(isGL ? r.net : r.amt) >= 0 ? 'text-green-700' : 'text-red-700'}`}>
               {fmtAmt(isGL ? r.net : r.amt)}
             </td>
             {isGL && <td className="py-2 px-3 text-gray-400 font-mono">{r.control}</td>}
+            {!isGL && <td className="py-2 px-3">
+              <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
+                r.category === 'wire' ? 'bg-purple-50 text-purple-700 border border-purple-200' :
+                r.category === 'ach' ? 'bg-blue-50 text-blue-700 border border-blue-200' :
+                r.category === 'fee' ? 'bg-orange-50 text-orange-700 border border-orange-200' :
+                r.category === 'check' ? 'bg-gray-100 text-gray-600 border border-gray-200' :
+                r.category === 'transfer' ? 'bg-cyan-50 text-cyan-700 border border-cyan-200' :
+                'bg-gray-50 text-gray-500 border border-gray-200'
+              }`}>{CATEGORY_LABELS[r.category] || r.category}</span>
+            </td>}
           </tr>
         ))}
       </tbody>
@@ -78,6 +89,27 @@ function SingleSideTable({ rows, side }) {
 
 function sum(rows, field) {
   return rows.reduce((s, r) => s + (r[field] || 0), 0)
+}
+
+/**
+ * Category color chip for summary display
+ */
+function CategorySummary({ category, items }) {
+  const total = items.reduce((s, r) => s + r.amt, 0)
+  const colors = {
+    wire: 'bg-purple-50 text-purple-700 border-purple-200',
+    ach: 'bg-blue-50 text-blue-700 border-blue-200',
+    fee: 'bg-orange-50 text-orange-700 border-orange-200',
+    check: 'bg-gray-100 text-gray-600 border-gray-200',
+    transfer: 'bg-cyan-50 text-cyan-700 border-cyan-200',
+    other: 'bg-gray-50 text-gray-500 border-gray-200',
+  }
+  return (
+    <div className={`flex items-center justify-between px-3 py-2 rounded-lg border ${colors[category] || colors.other}`}>
+      <span className="text-xs font-medium">{CATEGORY_LABELS[category] || category} ({items.length})</span>
+      <span className={`text-xs font-mono font-semibold ${total >= 0 ? '' : ''}`}>{fmtAmt(total)}</span>
+    </div>
+  )
 }
 
 export default function App() {
@@ -164,25 +196,180 @@ export default function App() {
 
   const copyReport = useCallback(() => {
     if (!results) return
-    const { matched, nearMatch, unmatchedGL, unmatchedBK, inTransitGL, inTransitBK } = results
+    const { matched, nearMatch, unmatchedGL, unmatchedBK, bankByCategory,
+            inTransitGL, inTransitBK, receiptDetails, periodWarning } = results
+
+    const pad = (s, n) => (s || '').padEnd(n)
+    const rpad = (s, n) => (s || '').padStart(n)
+    const divider = '─'.repeat(72)
+
+    // Calculate totals
+    const matchedGLTotal = matched.reduce((s, m) => s + m.gl.net, 0)
+    const matchedBKTotal = matched.reduce((s, m) => s + m.bk.amt, 0)
+    const nearMatchGLTotal = nearMatch.reduce((s, m) => s + m.gl.net, 0)
+    const unmatchedGLTotal = sum(unmatchedGL, 'net')
+    const unmatchedBKTotal = sum(unmatchedBK, 'amt')
+    const inTransitGLTotal = sum(inTransitGL, 'net')
+    const inTransitBKTotal = sum(inTransitBK, 'amt')
+
+    // GL side totals (book)
+    const glTotal = matchedGLTotal + nearMatchGLTotal + unmatchedGLTotal + inTransitGLTotal
+    // Bank side totals
+    const bkTotal = matchedBKTotal + sum(nearMatch.map(m => m.bk), 'amt') + unmatchedBKTotal + inTransitBKTotal
+
     const lines = [
-      `BANK RECONCILIATION — ${MONTHS[recMonth]} ${recYear}`,
+      `BANK RECONCILIATION REPORT`,
+      `${MONTHS[recMonth]} ${recYear}`,
       `Generated: ${new Date().toLocaleString()}`,
       '',
-      `SUMMARY`,
-      `  Matched:          ${matched.length} transactions`,
-      `  Near-Match:       ${nearMatch.length} transactions`,
-      `  Unmatched GL:     ${unmatchedGL.length} transactions  (${fmtAmt(sum(unmatchedGL, 'net'))})`,
-      `  Unmatched Bank:   ${unmatchedBK.length} transactions  (${fmtAmt(sum(unmatchedBK, 'amt'))})`,
-      `  In-Transit GL:    ${inTransitGL.length} transactions`,
-      `  In-Transit Bank:  ${inTransitBK.length} transactions`,
+      divider,
+      'SECTION 1: RECONCILIATION SUMMARY',
+      divider,
       '',
-      '--- UNMATCHED GL ---',
-      ...unmatchedGL.map(r => `  ${fmtDate(r.date)}  ${r.desc.padEnd(40)}  ${fmtAmt(r.net)}`),
-      '',
-      '--- UNMATCHED BANK ---',
-      ...unmatchedBK.map(r => `  ${fmtDate(r.date)}  ${r.desc.padEnd(40)}  ${fmtAmt(r.amt)}`),
+      `  Matched Transactions:       ${String(matched.length).padStart(5)}    ${rpad(fmtAmt(matchedBKTotal), 14)}`,
+      `  Near-Match (review):        ${String(nearMatch.length).padStart(5)}    ${rpad(fmtAmt(nearMatchGLTotal), 14)}`,
+      `  Unmatched GL (book only):   ${String(unmatchedGL.length).padStart(5)}    ${rpad(fmtAmt(unmatchedGLTotal), 14)}`,
+      `  Unmatched Bank (bank only): ${String(unmatchedBK.length).padStart(5)}    ${rpad(fmtAmt(unmatchedBKTotal), 14)}`,
+      `  In-Transit GL:              ${String(inTransitGL.length).padStart(5)}    ${rpad(fmtAmt(inTransitGLTotal), 14)}`,
+      `  In-Transit Bank:            ${String(inTransitBK.length).padStart(5)}    ${rpad(fmtAmt(inTransitBKTotal), 14)}`,
     ]
+
+    if (receiptDetails && receiptDetails.length > 0) {
+      lines.push(`  Receipt Detail Lines:       ${String(receiptDetails.length).padStart(5)}    (excluded from matching — rolled into deposit totals)`)
+    }
+
+    if (periodWarning) {
+      lines.push('', `  ⚠ PERIOD WARNING: ${periodWarning}`)
+    }
+
+    // SECTION 2: BALANCE PER BOOKS
+    lines.push(
+      '',
+      divider,
+      'SECTION 2: BALANCE PER BOOKS (GL)',
+      divider,
+      '',
+      `  Book activity (matched):              ${rpad(fmtAmt(matchedGLTotal), 14)}`,
+      `  Book activity (near-match):           ${rpad(fmtAmt(nearMatchGLTotal), 14)}`,
+      '',
+      '  Adjustments needed (items on bank, not in GL):',
+    )
+
+    // Group unmatched bank items by category
+    const cats = Object.keys(bankByCategory || {}).sort()
+    if (cats.length > 0) {
+      for (const cat of cats) {
+        const items = bankByCategory[cat]
+        const catTotal = items.reduce((s, r) => s + r.amt, 0)
+        lines.push(`    ${pad(CATEGORY_LABELS[cat] || cat, 24)} (${items.length})    ${rpad(fmtAmt(catTotal), 14)}`)
+      }
+    } else {
+      lines.push('    (none)')
+    }
+
+    lines.push(
+      `  Total bank adjustments:               ${rpad(fmtAmt(unmatchedBKTotal), 14)}`,
+      '',
+      `  ADJUSTED BOOK BALANCE:                ${rpad(fmtAmt(glTotal + unmatchedBKTotal), 14)}`,
+    )
+
+    // SECTION 3: BALANCE PER BANK
+    lines.push(
+      '',
+      divider,
+      'SECTION 3: BALANCE PER BANK STATEMENT',
+      divider,
+      '',
+      `  Bank activity (matched):              ${rpad(fmtAmt(matchedBKTotal), 14)}`,
+      `  Bank activity (near-match):           ${rpad(fmtAmt(sum(nearMatch.map(m => m.bk), 'amt')), 14)}`,
+      '',
+      '  Outstanding items (in GL, not yet on bank):',
+    )
+
+    // Split unmatched GL into deposits in transit and outstanding payments
+    const outstandingDeposits = unmatchedGL.filter(r => r.net > 0)
+    const outstandingPayments = unmatchedGL.filter(r => r.net < 0)
+    const depTotal = sum(outstandingDeposits, 'net')
+    const payTotal = sum(outstandingPayments, 'net')
+
+    if (outstandingDeposits.length > 0) {
+      lines.push(`    Deposits in transit       (${outstandingDeposits.length})    ${rpad(fmtAmt(depTotal), 14)}`)
+    }
+    if (outstandingPayments.length > 0) {
+      lines.push(`    Outstanding checks/pmts   (${outstandingPayments.length})    ${rpad(fmtAmt(payTotal), 14)}`)
+    }
+    if (unmatchedGL.length === 0) {
+      lines.push('    (none)')
+    }
+
+    lines.push(
+      `  Total outstanding:                    ${rpad(fmtAmt(unmatchedGLTotal), 14)}`,
+      '',
+      `  ADJUSTED BANK BALANCE:                ${rpad(fmtAmt(bkTotal + unmatchedGLTotal), 14)}`,
+    )
+
+    // SECTION 4: DIFFERENCE
+    const diff = (glTotal + unmatchedBKTotal) - (bkTotal + unmatchedGLTotal)
+    lines.push(
+      '',
+      divider,
+      'RECONCILIATION RESULT',
+      divider,
+      '',
+      `  Adjusted Book Balance:                ${rpad(fmtAmt(glTotal + unmatchedBKTotal), 14)}`,
+      `  Adjusted Bank Balance:                ${rpad(fmtAmt(bkTotal + unmatchedGLTotal), 14)}`,
+      `  DIFFERENCE:                           ${rpad(fmtAmt(diff), 14)}`,
+      `  STATUS: ${Math.abs(diff) < 0.02 ? 'RECONCILED' : 'UNRECONCILED — INVESTIGATE'}`,
+    )
+
+    // SECTION 5: DETAIL — Unmatched items
+    if (unmatchedGL.length > 0) {
+      lines.push(
+        '',
+        divider,
+        'DETAIL: OUTSTANDING GL ITEMS (in books, not on bank)',
+        divider,
+        '',
+      )
+      for (const r of unmatchedGL) {
+        lines.push(`  ${pad(fmtDate(r.date), 12)} ${pad(r.desc, 42)} ${rpad(fmtAmt(r.net), 14)}`)
+      }
+    }
+
+    if (unmatchedBK.length > 0) {
+      lines.push(
+        '',
+        divider,
+        'DETAIL: UNRECORDED BANK ITEMS (on bank, not in books)',
+        divider,
+        '',
+      )
+      for (const cat of cats) {
+        const items = bankByCategory[cat]
+        if (items.length === 0) continue
+        lines.push(`  --- ${CATEGORY_LABELS[cat] || cat} ---`)
+        for (const r of items) {
+          lines.push(`  ${pad(fmtDate(r.date), 12)} ${pad(r.desc, 42)} ${rpad(fmtAmt(r.amt), 14)}`)
+        }
+        lines.push('')
+      }
+    }
+
+    if (nearMatch.length > 0) {
+      lines.push(
+        '',
+        divider,
+        'DETAIL: NEAR-MATCHES (review recommended)',
+        divider,
+        '',
+      )
+      for (const { gl, bk, dayDiff: dd } of nearMatch) {
+        lines.push(`  GL: ${pad(fmtDate(gl.date), 12)} ${pad(gl.desc, 30)} ${rpad(fmtAmt(gl.net), 12)}`)
+        lines.push(`  BK: ${pad(fmtDate(bk.date), 12)} ${pad(bk.desc, 30)} ${rpad(fmtAmt(bk.amt), 12)}  (${dd} days apart)`)
+        lines.push('')
+      }
+    }
+
     navigator.clipboard.writeText(lines.join('\n'))
     setCopied(true)
     setTimeout(() => setCopied(false), 2000)
@@ -197,7 +384,7 @@ export default function App() {
         <div className="max-w-6xl mx-auto px-6 py-4 flex items-center justify-between">
           <div>
             <h1 className="text-xl font-bold text-gray-900">Bank Reconciliation</h1>
-            <p className="text-xs text-gray-400 mt-0.5">Paste GL export and bank statement CSV to reconcile</p>
+            <p className="text-xs text-gray-400 mt-0.5">Upload GL export and bank statement to reconcile</p>
           </div>
           <div className="flex items-center gap-2">
             <span className="text-xs text-gray-400 bg-gray-100 px-3 py-1 rounded-full font-medium">GWC Tool</span>
@@ -258,7 +445,7 @@ export default function App() {
         <div className="grid md:grid-cols-2 gap-4">
           <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
             <PasteZone
-              label="GL Export (CSV)"
+              label="GL Export (CSV / Excel)"
               hint={"Paste Yardi/Voyager GL export here…\nExpected columns: Date, Debit, Credit, Description"}
               value={glText}
               onChange={handleGLChange}
@@ -267,7 +454,7 @@ export default function App() {
           </div>
           <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
             <PasteZone
-              label="Bank Statement (CSV)"
+              label="Bank Statement (CSV / Excel)"
               hint={"Paste bank statement CSV here…\nSupports: BofA, Wells Fargo, PNC, TD, Truist, Metro, PPAC"}
               value={bankText}
               onChange={handleBankChange}
@@ -297,10 +484,38 @@ export default function App() {
 
         {/* Results */}
         {results && (() => {
-          const { matched, nearMatch, unmatchedGL, unmatchedBK, inTransitGL, inTransitBK } = results
-          const matchRate = results.gl.length > 0 ? Math.round((matched.length / results.gl.length) * 100) : 0
+          const { matched, nearMatch, unmatchedGL, unmatchedBK, bankByCategory,
+                  inTransitGL, inTransitBK, receiptDetails, periodWarning } = results
+          const matchableCount = (results.gl.length - (receiptDetails?.length || 0))
+          const matchRate = matchableCount > 0 ? Math.round((matched.length / matchableCount) * 100) : 0
           return (
             <div className="flex flex-col gap-4">
+
+              {/* Period Warning */}
+              {periodWarning && (
+                <div className="bg-amber-50 border border-amber-300 rounded-xl p-4 flex items-start gap-3">
+                  <span className="text-amber-500 text-lg mt-0.5">⚠</span>
+                  <div>
+                    <div className="text-sm font-semibold text-amber-800">Period Mismatch Detected</div>
+                    <div className="text-xs text-amber-700 mt-1">{periodWarning}</div>
+                  </div>
+                </div>
+              )}
+
+              {/* Receipt Details Info */}
+              {receiptDetails && receiptDetails.length > 0 && (
+                <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 flex items-start gap-3">
+                  <span className="text-blue-500 text-lg mt-0.5">ℹ</span>
+                  <div>
+                    <div className="text-sm font-semibold text-blue-800">Deposit Totals Detected</div>
+                    <div className="text-xs text-blue-700 mt-1">
+                      {receiptDetails.length} individual receipt lines were excluded from matching.
+                      Only deposit totals ({matched.length + nearMatch.length + unmatchedGL.filter(r => r.isDepositTotal).length} rows) are matched against bank deposits to prevent double-counting.
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {/* Summary Cards */}
               <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
                 <SummaryCard label="Matched" value={matched.length} color="green" />
@@ -310,6 +525,18 @@ export default function App() {
                 <SummaryCard label="In-Transit" value={inTransitGL.length + inTransitBK.length} color="blue" />
                 <SummaryCard label="Match Rate" value={matchRate + '%'} color={matchRate >= 90 ? 'green' : matchRate >= 70 ? 'amber' : 'red'} />
               </div>
+
+              {/* Bank Item Categories */}
+              {unmatchedBK.length > 0 && Object.keys(bankByCategory).length > 0 && (
+                <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
+                  <div className="text-sm font-semibold text-gray-700 mb-3">Unmatched Bank Items by Type</div>
+                  <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-2">
+                    {Object.entries(bankByCategory).map(([cat, items]) => (
+                      <CategorySummary key={cat} category={cat} items={items} />
+                    ))}
+                  </div>
+                </div>
+              )}
 
               {/* Matched */}
               <Section
@@ -352,7 +579,7 @@ export default function App() {
               {/* Unmatched GL */}
               {unmatchedGL.length > 0 && (
                 <Section
-                  title="Unmatched GL Items"
+                  title="Outstanding GL Items (in books, not on bank)"
                   badge={<Tag color="red">{unmatchedGL.length} · {fmtAmt(sum(unmatchedGL, 'net'))}</Tag>}
                   defaultOpen
                 >
@@ -365,7 +592,7 @@ export default function App() {
               {/* Unmatched Bank */}
               {unmatchedBK.length > 0 && (
                 <Section
-                  title="Unmatched Bank Items"
+                  title="Unrecorded Bank Items (on bank, not in books)"
                   badge={<Tag color="red">{unmatchedBK.length} · {fmtAmt(sum(unmatchedBK, 'amt'))}</Tag>}
                   defaultOpen
                 >
@@ -399,29 +626,77 @@ export default function App() {
                 </Section>
               )}
 
-              {/* Balance Check */}
+              {/* Reconciliation Balance */}
               <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
-                <div className="text-sm font-semibold text-gray-700 mb-3">Balance Summary</div>
-                <div className="grid md:grid-cols-3 gap-4 text-sm">
-                  <div className="flex flex-col gap-1">
-                    <span className="text-xs text-gray-400 uppercase tracking-wide">GL Net (unmatched)</span>
-                    <span className={`font-mono font-bold text-lg ${sum(unmatchedGL, 'net') === 0 ? 'text-green-700' : 'text-red-700'}`}>
-                      {fmtAmt(sum(unmatchedGL, 'net'))}
-                    </span>
+                <div className="text-sm font-semibold text-gray-700 mb-3">Reconciliation Balance</div>
+                <div className="grid md:grid-cols-2 gap-6 text-sm">
+                  <div className="flex flex-col gap-2">
+                    <span className="text-xs text-gray-400 uppercase tracking-wide font-semibold">Balance per Books (GL)</span>
+                    <div className="flex justify-between text-xs text-gray-600">
+                      <span>Matched + near-match activity</span>
+                      <span className="font-mono">{fmtAmt(matched.reduce((s,m) => s+m.gl.net, 0) + nearMatch.reduce((s,m) => s+m.gl.net, 0))}</span>
+                    </div>
+                    <div className="flex justify-between text-xs text-gray-600">
+                      <span>Outstanding GL items</span>
+                      <span className="font-mono">{fmtAmt(sum(unmatchedGL, 'net'))}</span>
+                    </div>
+                    <div className="flex justify-between text-xs text-gray-600">
+                      <span>+ Bank adjustments needed</span>
+                      <span className="font-mono">{fmtAmt(sum(unmatchedBK, 'amt'))}</span>
+                    </div>
+                    <div className="border-t border-gray-200 pt-2 flex justify-between font-semibold">
+                      <span>Adjusted Book Balance</span>
+                      <span className="font-mono">{fmtAmt(
+                        matched.reduce((s,m) => s+m.gl.net, 0) +
+                        nearMatch.reduce((s,m) => s+m.gl.net, 0) +
+                        sum(unmatchedGL, 'net') +
+                        sum(inTransitGL, 'net') +
+                        sum(unmatchedBK, 'amt')
+                      )}</span>
+                    </div>
                   </div>
-                  <div className="flex flex-col gap-1">
-                    <span className="text-xs text-gray-400 uppercase tracking-wide">Bank Net (unmatched)</span>
-                    <span className={`font-mono font-bold text-lg ${sum(unmatchedBK, 'amt') === 0 ? 'text-green-700' : 'text-red-700'}`}>
-                      {fmtAmt(sum(unmatchedBK, 'amt'))}
-                    </span>
-                  </div>
-                  <div className="flex flex-col gap-1">
-                    <span className="text-xs text-gray-400 uppercase tracking-wide">Difference</span>
-                    <span className={`font-mono font-bold text-lg ${Math.abs(sum(unmatchedGL, 'net') - sum(unmatchedBK, 'amt')) < 0.02 ? 'text-green-700' : 'text-red-700'}`}>
-                      {fmtAmt(sum(unmatchedGL, 'net') - sum(unmatchedBK, 'amt'))}
-                    </span>
+                  <div className="flex flex-col gap-2">
+                    <span className="text-xs text-gray-400 uppercase tracking-wide font-semibold">Balance per Bank</span>
+                    <div className="flex justify-between text-xs text-gray-600">
+                      <span>Matched + near-match activity</span>
+                      <span className="font-mono">{fmtAmt(matched.reduce((s,m) => s+m.bk.amt, 0) + nearMatch.reduce((s,m) => s+m.bk.amt, 0))}</span>
+                    </div>
+                    <div className="flex justify-between text-xs text-gray-600">
+                      <span>Unrecorded bank items</span>
+                      <span className="font-mono">{fmtAmt(sum(unmatchedBK, 'amt'))}</span>
+                    </div>
+                    <div className="flex justify-between text-xs text-gray-600">
+                      <span>+ Outstanding GL items</span>
+                      <span className="font-mono">{fmtAmt(sum(unmatchedGL, 'net'))}</span>
+                    </div>
+                    <div className="border-t border-gray-200 pt-2 flex justify-between font-semibold">
+                      <span>Adjusted Bank Balance</span>
+                      <span className="font-mono">{fmtAmt(
+                        matched.reduce((s,m) => s+m.bk.amt, 0) +
+                        nearMatch.reduce((s,m) => s+m.bk.amt, 0) +
+                        sum(unmatchedBK, 'amt') +
+                        sum(inTransitBK, 'amt') +
+                        sum(unmatchedGL, 'net')
+                      )}</span>
+                    </div>
                   </div>
                 </div>
+                {/* Final difference */}
+                {(() => {
+                  const adjBook = matched.reduce((s,m) => s+m.gl.net, 0) + nearMatch.reduce((s,m) => s+m.gl.net, 0) + sum(unmatchedGL, 'net') + sum(inTransitGL, 'net') + sum(unmatchedBK, 'amt')
+                  const adjBank = matched.reduce((s,m) => s+m.bk.amt, 0) + nearMatch.reduce((s,m) => s+m.bk.amt, 0) + sum(unmatchedBK, 'amt') + sum(inTransitBK, 'amt') + sum(unmatchedGL, 'net')
+                  const diff = adjBook - adjBank
+                  return (
+                    <div className={`mt-4 pt-4 border-t-2 ${Math.abs(diff) < 0.02 ? 'border-green-300' : 'border-red-300'} flex justify-between items-center`}>
+                      <span className={`font-bold text-sm ${Math.abs(diff) < 0.02 ? 'text-green-700' : 'text-red-700'}`}>
+                        {Math.abs(diff) < 0.02 ? 'RECONCILED' : 'DIFFERENCE (investigate)'}
+                      </span>
+                      <span className={`font-mono font-bold text-lg ${Math.abs(diff) < 0.02 ? 'text-green-700' : 'text-red-700'}`}>
+                        {fmtAmt(diff)}
+                      </span>
+                    </div>
+                  )
+                })()}
               </div>
             </div>
           )
