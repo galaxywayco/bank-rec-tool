@@ -5,6 +5,7 @@ import { parseGLRows, parseBankRows, matchTransactions, CATEGORY_LABELS, runVeri
 import { Section, Tag } from './components/Section'
 import { SummaryCard } from './components/SummaryCard'
 import { PasteZone } from './components/PasteZone'
+import { ReportModal } from './components/ReportModal'
 
 const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December']
 const now = new Date()
@@ -127,8 +128,7 @@ export default function App() {
   const [error, setError] = useState('')
   const [detectedBank, setDetectedBank] = useState(null)
   const [detectedGL, setDetectedGL] = useState(null)
-  const [copied, setCopied] = useState(false)
-  const [reportText, setReportText] = useState('')
+  const [showExport, setShowExport] = useState(false)
 
   const handleBankChange = useCallback((val) => {
     setBankText(val)
@@ -212,215 +212,6 @@ export default function App() {
       setError('Parsing error: ' + e.message)
     }
   }, [glText, bankText, recMonth, recYear, transitStart, transitEnd])
-
-  const copyReport = useCallback(() => {
-    if (!results) return
-    const { matched, nearMatch, unmatchedGL, unmatchedBK, bankByCategory,
-            inTransitGL, inTransitBK, receiptDetails, periodWarning } = results
-
-    const pad = (s, n) => (s || '').padEnd(n)
-    const rpad = (s, n) => (s || '').padStart(n)
-    const divider = '─'.repeat(72)
-
-    // Calculate totals
-    const matchedGLTotal = matched.reduce((s, m) => s + m.gl.net, 0)
-    const matchedBKTotal = matched.reduce((s, m) => s + m.bk.amt, 0)
-    const nearMatchGLTotal = nearMatch.reduce((s, m) => s + m.gl.net, 0)
-    const unmatchedGLTotal = sum(unmatchedGL, 'net')
-    const unmatchedBKTotal = sum(unmatchedBK, 'amt')
-    const inTransitGLTotal = sum(inTransitGL, 'net')
-    const inTransitBKTotal = sum(inTransitBK, 'amt')
-
-    // GL side totals (book)
-    const glTotal = matchedGLTotal + nearMatchGLTotal + unmatchedGLTotal + inTransitGLTotal
-    // Bank side totals
-    const bkTotal = matchedBKTotal + sum(nearMatch.map(m => m.bk), 'amt') + unmatchedBKTotal + inTransitBKTotal
-
-    const lines = [
-      `BANK RECONCILIATION REPORT`,
-      `${MONTHS[recMonth]} ${recYear}`,
-      `Generated: ${new Date().toLocaleString()}`,
-      '',
-      divider,
-      'SECTION 1: RECONCILIATION SUMMARY',
-      divider,
-      '',
-      `  Matched Transactions:       ${String(matched.length).padStart(5)}    ${rpad(fmtAmt(matchedBKTotal), 14)}`,
-      `  Near-Match (review):        ${String(nearMatch.length).padStart(5)}    ${rpad(fmtAmt(nearMatchGLTotal), 14)}`,
-      `  Unmatched GL (book only):   ${String(unmatchedGL.length).padStart(5)}    ${rpad(fmtAmt(unmatchedGLTotal), 14)}`,
-      `  Unmatched Bank (bank only): ${String(unmatchedBK.length).padStart(5)}    ${rpad(fmtAmt(unmatchedBKTotal), 14)}`,
-      `  In-Transit GL:              ${String(inTransitGL.length).padStart(5)}    ${rpad(fmtAmt(inTransitGLTotal), 14)}`,
-      `  In-Transit Bank:            ${String(inTransitBK.length).padStart(5)}    ${rpad(fmtAmt(inTransitBKTotal), 14)}`,
-    ]
-
-    if (receiptDetails && receiptDetails.length > 0) {
-      lines.push(`  Receipt Detail Lines:       ${String(receiptDetails.length).padStart(5)}    (excluded from matching — rolled into deposit totals)`)
-    }
-
-    if (periodWarning) {
-      lines.push('', `  ⚠ PERIOD WARNING: ${periodWarning}`)
-    }
-
-    // SECTION 2: BALANCE PER BOOKS
-    lines.push(
-      '',
-      divider,
-      'SECTION 2: BALANCE PER BOOKS (GL)',
-      divider,
-      '',
-      `  Book activity (matched):              ${rpad(fmtAmt(matchedGLTotal), 14)}`,
-      `  Book activity (near-match):           ${rpad(fmtAmt(nearMatchGLTotal), 14)}`,
-      '',
-      '  Adjustments needed (items on bank, not in GL):',
-    )
-
-    // Group unmatched bank items by category
-    const cats = Object.keys(bankByCategory || {}).sort()
-    if (cats.length > 0) {
-      for (const cat of cats) {
-        const items = bankByCategory[cat]
-        const catTotal = items.reduce((s, r) => s + r.amt, 0)
-        lines.push(`    ${pad(CATEGORY_LABELS[cat] || cat, 24)} (${items.length})    ${rpad(fmtAmt(catTotal), 14)}`)
-      }
-    } else {
-      lines.push('    (none)')
-    }
-
-    lines.push(
-      `  Total bank adjustments:               ${rpad(fmtAmt(unmatchedBKTotal), 14)}`,
-      '',
-      `  ADJUSTED BOOK BALANCE:                ${rpad(fmtAmt(glTotal + unmatchedBKTotal), 14)}`,
-    )
-
-    // SECTION 3: BALANCE PER BANK
-    lines.push(
-      '',
-      divider,
-      'SECTION 3: BALANCE PER BANK STATEMENT',
-      divider,
-      '',
-      `  Bank activity (matched):              ${rpad(fmtAmt(matchedBKTotal), 14)}`,
-      `  Bank activity (near-match):           ${rpad(fmtAmt(sum(nearMatch.map(m => m.bk), 'amt')), 14)}`,
-      '',
-      '  Outstanding items (in GL, not yet on bank):',
-    )
-
-    // Split unmatched GL into deposits in transit and outstanding payments
-    const outstandingDeposits = unmatchedGL.filter(r => r.net > 0)
-    const outstandingPayments = unmatchedGL.filter(r => r.net < 0)
-    const depTotal = sum(outstandingDeposits, 'net')
-    const payTotal = sum(outstandingPayments, 'net')
-
-    if (outstandingDeposits.length > 0) {
-      lines.push(`    Deposits in transit       (${outstandingDeposits.length})    ${rpad(fmtAmt(depTotal), 14)}`)
-    }
-    if (outstandingPayments.length > 0) {
-      lines.push(`    Outstanding checks/pmts   (${outstandingPayments.length})    ${rpad(fmtAmt(payTotal), 14)}`)
-    }
-    if (unmatchedGL.length === 0) {
-      lines.push('    (none)')
-    }
-
-    lines.push(
-      `  Total outstanding:                    ${rpad(fmtAmt(unmatchedGLTotal), 14)}`,
-      '',
-      `  ADJUSTED BANK BALANCE:                ${rpad(fmtAmt(bkTotal + unmatchedGLTotal), 14)}`,
-    )
-
-    // SECTION 4: DIFFERENCE
-    const diff = (glTotal + unmatchedBKTotal) - (bkTotal + unmatchedGLTotal)
-    lines.push(
-      '',
-      divider,
-      'RECONCILIATION RESULT',
-      divider,
-      '',
-      `  Adjusted Book Balance:                ${rpad(fmtAmt(glTotal + unmatchedBKTotal), 14)}`,
-      `  Adjusted Bank Balance:                ${rpad(fmtAmt(bkTotal + unmatchedGLTotal), 14)}`,
-      `  DIFFERENCE:                           ${rpad(fmtAmt(diff), 14)}`,
-      `  STATUS: ${Math.abs(diff) < 0.02 ? 'RECONCILED' : 'UNRECONCILED — INVESTIGATE'}`,
-    )
-
-    // SECTION 5: DETAIL — Unmatched items
-    if (unmatchedGL.length > 0) {
-      lines.push(
-        '',
-        divider,
-        'DETAIL: OUTSTANDING GL ITEMS (in books, not on bank)',
-        divider,
-        '',
-      )
-      for (const r of unmatchedGL) {
-        lines.push(`  ${pad(fmtDate(r.date), 12)} ${pad(r.desc, 42)} ${rpad(fmtAmt(r.net), 14)}`)
-      }
-    }
-
-    if (unmatchedBK.length > 0) {
-      lines.push(
-        '',
-        divider,
-        'DETAIL: UNRECORDED BANK ITEMS (on bank, not in books)',
-        divider,
-        '',
-      )
-      for (const cat of cats) {
-        const items = bankByCategory[cat]
-        if (items.length === 0) continue
-        lines.push(`  --- ${CATEGORY_LABELS[cat] || cat} ---`)
-        for (const r of items) {
-          lines.push(`  ${pad(fmtDate(r.date), 12)} ${pad(r.desc, 42)} ${rpad(fmtAmt(r.amt), 14)}`)
-        }
-        lines.push('')
-      }
-    }
-
-    if (nearMatch.length > 0) {
-      lines.push(
-        '',
-        divider,
-        'DETAIL: NEAR-MATCHES (review recommended)',
-        divider,
-        '',
-      )
-      for (const { gl, bk, dayDiff: dd } of nearMatch) {
-        lines.push(`  GL: ${pad(fmtDate(gl.date), 12)} ${pad(gl.desc, 30)} ${rpad(fmtAmt(gl.net), 12)}`)
-        lines.push(`  BK: ${pad(fmtDate(bk.date), 12)} ${pad(bk.desc, 30)} ${rpad(fmtAmt(bk.amt), 12)}  (${dd} days apart)`)
-        lines.push('')
-      }
-    }
-
-    // Append verification results
-    if (results.verification) {
-      const v = results.verification
-      lines.push(
-        '',
-        divider,
-        'INTEGRITY VERIFICATION',
-        divider,
-        '',
-        `  ${v.summary}`,
-        '',
-      )
-      for (const check of v.checks) {
-        const icon = check.pass ? 'PASS' : check.severity === 'warning' ? 'WARN' : 'FAIL'
-        lines.push(`  [${icon}] ${check.label}: ${check.detail}`)
-      }
-    }
-
-    const report = lines.join('\n')
-    setReportText(report)
-    navigator.clipboard.writeText(report)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 2000)
-  }, [results, recMonth, recYear])
-
-  const emailReport = useCallback(() => {
-    if (!reportText && results) copyReport()  // generate report first if needed
-    const subject = `Bank Reconciliation — ${MONTHS[recMonth]} ${recYear}`
-    const body = reportText || '(Run "Copy Report" first to generate the report)'
-    const mailto = `mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`
-    window.open(mailto, '_blank')
-  }, [reportText, results, copyReport, recMonth, recYear])
 
   const years = [recYear - 1, recYear, recYear + 1]
 
@@ -519,20 +310,12 @@ export default function App() {
             Run Reconciliation
           </button>
           {results && (
-            <>
-              <button
-                onClick={copyReport}
-                className="border border-gray-300 hover:border-indigo-400 text-gray-600 hover:text-indigo-700 font-medium px-5 py-3 rounded-xl transition-colors text-sm"
-              >
-                {copied ? '✓ Copied!' : 'Copy Report'}
-              </button>
-              <button
-                onClick={emailReport}
-                className="border border-gray-300 hover:border-emerald-400 text-gray-600 hover:text-emerald-700 font-medium px-5 py-3 rounded-xl transition-colors text-sm"
-              >
-                Email Report
-              </button>
-            </>
+            <button
+              onClick={() => setShowExport(true)}
+              className="border border-gray-300 hover:border-indigo-400 text-gray-600 hover:text-indigo-700 font-medium px-5 py-3 rounded-xl transition-colors text-sm"
+            >
+              Export Report
+            </button>
           )}
           {error && <span className="text-sm text-red-600 bg-red-50 border border-red-200 px-4 py-2 rounded-lg">{error}</span>}
         </div>
@@ -801,6 +584,16 @@ export default function App() {
           )
         })()}
       </div>
+
+      {/* Export Modal */}
+      {showExport && results && (
+        <ReportModal
+          results={results}
+          recMonth={recMonth}
+          recYear={recYear}
+          onClose={() => setShowExport(false)}
+        />
+      )}
     </div>
   )
 }
